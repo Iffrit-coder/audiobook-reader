@@ -315,16 +315,17 @@
   async function extractPdf(file) {
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    const lines = []; // { text, size }
+    const numPages = pdf.numPages;
+    const lines = []; // { text, size, page }
 
-    for (let p = 1; p <= pdf.numPages; p++) {
-      setStatus(`Reading PDF… page ${p}/${pdf.numPages}`);
+    for (let p = 1; p <= numPages; p++) {
+      setStatus(`Reading PDF… page ${p}/${numPages}`);
       const page = await pdf.getPage(p);
       const content = await page.getTextContent();
       let items = [], size = 0;
       const flush = () => {
         const text = items.join(" ").replace(/\s+/g, " ").trim();
-        if (text) lines.push({ text, size });
+        if (text) lines.push({ text, size, page: p });
         items = []; size = 0;
       };
       for (const it of content.items) {
@@ -342,6 +343,31 @@
     let body = 0, most = -1;
     for (const s in tally) if (tally[s] > most) { most = tally[s]; body = +s; }
 
+    // ---- Detect repeated running headers / footers / download stamps ----
+    // Normalize so page numbers and dates don't defeat matching across pages.
+    const norm = (t) => t.toLowerCase().replace(/\d+/g, " ").replace(/[^a-z ]+/g, " ").replace(/\s+/g, " ").trim();
+    const SOURCE_RX = /(download|gutenberg|e-?book|copyright|©|retriev|accessed|https?|www\.|all rights reserved|licen[sc]e)/i;
+    const stats = {}; // norm -> { pages:Set, minSize }
+    lines.forEach(l => {
+      const n = norm(l.text);
+      if (n.length < 4) return;
+      const s = stats[n] || (stats[n] = { pages: new Set(), minSize: Infinity });
+      s.pages.add(l.page);
+      s.minSize = Math.min(s.minSize, l.size);
+    });
+    // Boilerplate = recurs on a large share of pages AND is either small type
+    // (the user's footer is "small text") or an obvious source/download phrase.
+    const threshold = Math.max(3, Math.ceil(numPages * 0.4));
+    const boilerplate = new Set(
+      Object.keys(stats).filter((n) => {
+        const s = stats[n];
+        if (s.pages.size < threshold) return false;
+        return (body && s.minSize < body) || SOURCE_RX.test(n);
+      })
+    );
+    // Standalone page numbers ("12", "Page 12", "- 12 -") are noise too.
+    const isPageNumber = (t) => /^[\s.\-–—|]*(?:page\s*)?\d{1,4}[\s.\-–—|]*$/i.test(t);
+
     const classify = (size) => {
       if (!body) return "text";
       if (size >= body * 1.45) return "title";
@@ -354,6 +380,7 @@
     let para = [];
     const flushPara = () => { if (para.length) { blocks.push({ type: "text", text: para.join(" ") }); para = []; } };
     for (const l of lines) {
+      if (isPageNumber(l.text) || boilerplate.has(norm(l.text))) continue; // drop footer/header/page-no
       const t = classify(l.size);
       if (t === "text") para.push(l.text);
       else { flushPara(); blocks.push({ type: t, text: l.text }); }
