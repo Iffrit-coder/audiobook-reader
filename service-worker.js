@@ -1,6 +1,6 @@
 // Offline cache for Audiobook Reader.
 // Bump CACHE_VERSION whenever index.html or the vendored libs change.
-const CACHE_VERSION = "audiobook-v1";
+const CACHE_VERSION = "audiobook-v2";
 const ASSETS = [
   "./",
   "./index.html",

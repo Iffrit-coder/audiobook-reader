@@ -534,7 +534,14 @@
 
   // ---------- Voices ----------
   let allVoices = [];
-  const isEnhanced = (name) => /\((Enhanced|Premium)\)/i.test(name);
+  // A voice counts as enhanced if its NAME says so (macOS: "Jamie (Enhanced)")
+  // OR its voiceURI marks it (iOS: "com.apple.voice.enhanced.en-GB.Daniel").
+  const isEnhanced = (v) => {
+    const name = (v && v.name) || "";
+    const uri = (v && v.voiceURI) || "";
+    return /\((Enhanced|Premium)\)/i.test(name) || /\b(enhanced|premium)\b/i.test(name) ||
+           /(enhanced|premium)/i.test(uri);
+  };
 
   // Build the <select> (grouped: Enhanced/Premium pinned on top), honoring the filter box.
   function renderVoiceOptions() {
@@ -546,7 +553,7 @@
     allVoices.forEach((v, i) => {
       if (filter && !`${v.name} ${v.lang}`.toLowerCase().includes(filter)) return;
       const e = { v, i };
-      if (isEnhanced(v.name)) enh.push(e);
+      if (isEnhanced(v)) enh.push(e);
       else if (v.lang.toLowerCase().startsWith("en")) eng.push(e);
       else other.push(e);
     });
@@ -556,10 +563,14 @@
       const og = document.createElement("optgroup");
       og.label = label;
       arr.forEach(({ v, i }) => {
+        const enh = isEnhanced(v);
         const opt = document.createElement("option");
         opt.value = i;
         opt.dataset.name = v.name;
-        opt.textContent = `${v.name} (${v.lang})`;
+        opt.dataset.enhanced = enh ? "1" : "";
+        // Tag enhanced voices whose name doesn't already say so (the iOS case).
+        const tag = enh && !/\((Enhanced|Premium)\)/i.test(v.name) ? " — Enhanced" : "";
+        opt.textContent = `${v.name} (${v.lang})${tag}`;
         og.appendChild(opt);
       });
       voiceSel.appendChild(og);
@@ -583,8 +594,8 @@
       if (m) { voiceSel.value = m.value; return; }
     }
     // First-run default: best English voice available → enhanced first.
-    const enEnh = opts.find(o => isEnhanced(o.dataset.name) && /\(en/i.test(o.textContent));
-    const anyEnh = opts.find(o => isEnhanced(o.dataset.name));
+    const enEnh = opts.find(o => o.dataset.enhanced === "1" && /\(en/i.test(o.textContent));
+    const anyEnh = opts.find(o => o.dataset.enhanced === "1");
     const anyEn = opts.find(o => /\(en/i.test(o.textContent));
     const pick = enEnh || anyEnh || anyEn || opts[0];
     if (pick) voiceSel.value = pick.value;
@@ -592,7 +603,7 @@
 
   function updateVoiceCount() {
     const n = allVoices.length;
-    const e = allVoices.filter(v => isEnhanced(v.name)).length;
+    const e = allVoices.filter(isEnhanced).length;
     voiceCount.textContent = n
       ? `${n} voices available${e ? ` · ${e} enhanced/premium` : " · none enhanced"}`
       : "loading voices…";
@@ -620,17 +631,24 @@
     const ua = navigator.userAgent;
     return /^((?!chrome|chromium|crios|edg|android).)*safari/i.test(ua);
   }
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 
   function updateVoiceHint() {
     const voices = synth.getVoices();
-    const hasPremium = voices.some(v => /enhanced|premium/i.test(v.name));
+    const hasPremium = voices.some(isEnhanced);
     if (voices.length && !hasPremium) {
-      voiceHint.innerHTML =
-        '⚠︎ No <strong>Enhanced/Premium</strong> voices are visible in this browser. On macOS, ' +
-        '<strong>Safari exposes only a limited voice set without them</strong>; <strong>Chromium-based ' +
-        'browsers (Comet, Chrome, Edge, Brave) expose the full system list</strong> including voices ' +
-        'like Jamie (Enhanced). Open this page in one of those to use them. ' +
-        '(Download voices via System Settings → Accessibility → Spoken Content → Manage Voices.)';
+      voiceHint.innerHTML = isIOS
+        ? '⚠︎ No <strong>Enhanced</strong> voices detected. On iPhone/iPad, download one in ' +
+          '<strong>Settings → Accessibility → Spoken Content → Voices → English</strong> ' +
+          '(pick a voice marked Enhanced or Premium), then reload this page and tap ↻. ' +
+          'Note: iOS doesn’t always expose its high-quality voices to web apps, and every iOS ' +
+          'browser shares the same engine — so switching browsers won’t change this.'
+        : '⚠︎ No <strong>Enhanced/Premium</strong> voices are visible in this browser. On macOS, ' +
+          '<strong>Safari exposes only a limited set without them</strong>; <strong>Chromium-based ' +
+          'browsers (Comet, Chrome, Edge) expose the full system list</strong> including voices like ' +
+          'Jamie (Enhanced). Open this page in one of those. ' +
+          '(Download voices via System Settings → Accessibility → Spoken Content → Manage Voices.)';
       voiceHint.style.display = "block";
     } else {
       voiceHint.style.display = "none";
@@ -774,8 +792,6 @@
 
   // Chrome silences long synth after ~15s; nudge it while actively speaking.
   // Safari/iOS have no such bug and the pause/resume nudge makes them stutter — skip there.
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-                (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   const NEEDS_KEEPALIVE = !isSafari() && !isIOS;
   setInterval(() => {
     if (NEEDS_KEEPALIVE && speaking && !paused && !inGap && synth.speaking) {
