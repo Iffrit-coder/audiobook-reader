@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Audiobook Reader</title>
+
+<!-- iOS / installable web-app -->
+<meta name="theme-color" content="#0f1115" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Audiobook" />
+<link rel="apple-touch-icon" href="icon.svg" />
+<link rel="icon" href="icon.svg" />
+<link rel="manifest" href="manifest.webmanifest" />
+
+<!-- Document parsers (vendored locally so the app works fully offline) -->
+<script src="vendor/pdf.min.js"></script>
+<script src="vendor/mammoth.browser.min.js"></script>
+
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1f2430;
+    --text: #e7e9ee;
+    --muted: #9aa3b2;
+    --accent: #6c8cff;
+    --accent-2: #4a6bff;
+    --highlight: #3a4a8c;
+    --border: #2a2f3a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    -webkit-text-size-adjust: 100%;
+  }
+  header {
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 24px; }
+
+  /* Drop zone */
+  #drop {
+    border: 2px dashed var(--border);
+    border-radius: 14px;
+    padding: 48px 24px;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+    background: var(--panel);
+  }
+  #drop.drag { border-color: var(--accent); background: var(--panel-2); color: var(--text); }
+  #drop strong { color: var(--text); }
+  #drop .formats { font-size: 12px; margin-top: 8px; }
+
+  /* Controls */
+  .controls {
+    position: sticky; top: 0; z-index: 5;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin: 18px 0;
+    display: none;
+    gap: 14px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .controls.show { display: flex; }
+  button.ctl {
+    background: var(--accent-2);
+    color: white; border: none;
+    border-radius: 10px;
+    padding: 10px 16px;
+    font-size: 14px; font-weight: 600;
+    cursor: pointer;
+  }
+  button.ctl:hover { background: var(--accent); }
+  button.ctl.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+  button.ctl:disabled { opacity: .45; cursor: default; }
+  .field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--muted); }
+  .field select, .field input[type=range] { accent-color: var(--accent); }
+  .saved-tag { color: var(--accent); }
+  .voice-row { display: flex; gap: 6px; align-items: center; }
+  button.refresh { padding: 7px 11px; font-size: 15px; line-height: 1; }
+  #voiceFilter {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 8px; font-size: 12px; max-width: 240px; margin-bottom: 4px;
+  }
+  .vcount { color: var(--muted); font-size: 11px; }
+  optgroup { color: var(--muted); }
+  option { color: var(--text); }
+  #voiceHint {
+    display: none;
+    background: #2a2310; border: 1px solid #5c4a14; color: #ffd479;
+    border-radius: 10px; padding: 10px 14px; font-size: 13px; margin: 14px 0 0;
+  }
+  #voiceHint a { color: #ffe6a8; }
+  select {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 8px; font-size: 13px; max-width: 240px;
+  }
+  .rate-val { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  /* Text view */
+  #status { color: var(--muted); font-size: 13px; margin: 10px 2px; min-height: 18px; }
+  #docTitle { font-size: 15px; font-weight: 600; margin: 4px 2px 0; }
+  #reader {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px 30px;
+    font-size: 18px;
+    display: none;
+    max-height: 65vh;
+    overflow-y: auto;
+  }
+  #reader.show { display: block; }
+
+  /* Structural styling */
+  .b-title { font-size: 27px; font-weight: 700; margin: 24px 0 10px; line-height: 1.3; }
+  .b-title:first-child { margin-top: 0; }
+  .b-sub { font-size: 21px; font-weight: 600; color: #c9d2e3; margin: 20px 0 8px; line-height: 1.35; }
+  .b-text { margin: 0 0 14px; }
+
+  .sent { cursor: pointer; border-radius: 4px; padding: 1px 2px; transition: background .1s; }
+  .sent:hover { background: var(--panel-2); }
+  .sent.active { background: var(--highlight); color: #fff; }
+  .err { color: #ff8080; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 24px; }
+  kbd { background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 11px; }
+
+  /* ---------- Phone layout ---------- */
+  @media (max-width: 600px) {
+    header { padding: 12px 16px; flex-wrap: wrap; gap: 2px; }
+    header h1 { font-size: 17px; }
+    header .sub { display: none; }
+    .wrap { padding: 14px 14px calc(20px + env(safe-area-inset-bottom)); }
+
+    #drop { padding: 30px 16px; }
+    .desktop-only { display: none; }
+
+    .controls { position: static; gap: 12px; padding: 14px; }
+    /* Each control stacks to its own full-width row; buttons stay big & tappable. */
+    .field { flex: 1 1 100%; font-size: 12px; }
+    .controls > button.ctl { flex: 1 1 auto; }
+    button.ctl { padding: 13px 18px; font-size: 16px; }
+    button.refresh { flex: 0 0 auto; padding: 11px 14px; }
+    .voice-row { width: 100%; }
+    select, #voiceFilter { max-width: none; width: 100%; font-size: 16px; padding: 10px; }
+    input[type=range] { width: 100%; height: 30px; }
+    .vcount { font-size: 12px; }
+
+    #reader { padding: 20px 18px; font-size: 18px; max-height: none; }
+    .b-title { font-size: 23px; }
+    .b-sub { font-size: 19px; }
+    .sent { padding: 2px 2px; }          /* slightly larger tap area per sentence */
+    footer { padding: 20px 16px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎧 Audiobook Reader</h1>
+  <span class="sub">Drop a document, press play — your browser reads it aloud.</span>
+</header>
+
+<div class="wrap">
+  <div id="drop">
+    <strong>Tap to choose a file</strong><span class="desktop-only"> or drag one here</span>
+    <div class="formats">Supported: PDF · DOCX · TXT · Markdown &nbsp;|&nbsp; legacy .DOC not supported</div>
+  </div>
+  <input type="file" id="file" hidden
+    accept=".pdf,.docx,.txt,.md,.markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" />
+
+  <div class="controls" id="controls">
+    <button class="ctl" id="play">▶ Play</button>
+    <button class="ctl secondary" id="stop" disabled>⏹ Stop</button>
+    <div class="field">
+      Voice <span class="saved-tag">· saved as default</span>
+      <input type="text" id="voiceFilter" placeholder="filter… e.g. jamie" />
+      <div class="voice-row">
+        <select id="voice"></select>
+        <button class="ctl secondary refresh" id="refreshVoices" title="Re-scan installed voices">↻</button>
+      </div>
+      <span id="voiceCount" class="vcount"></span>
+    </div>
+    <div class="field">
+      Speed <span class="rate-val" id="rateVal">1.0×</span>
+      <input type="range" id="rate" min="0.5" max="2" step="0.1" value="1" />
+    </div>
+    <div class="field">
+      Pitch
+      <input type="range" id="pitch" min="0" max="2" step="0.1" value="1" />
+    </div>
+  </div>
+
+  <div id="voiceHint"></div>
+  <div id="docTitle"></div>
+  <div id="status"></div>
+  <div id="reader"></div>
+</div>
+
+<footer>
+  Everything runs locally in your browser. Nothing is uploaded.
+  Tip: click any sentence to start reading from there. <kbd>Space</kbd> play/pause.
+</footer>
+
+<script>
+  // pdf.js worker
+  if (window.pdfjsLib) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
+  }
+
+  const $ = (id) => document.getElementById(id);
+  const dropEl = $("drop"), fileEl = $("file"), controls = $("controls");
+  const readerEl = $("reader"), statusEl = $("status"), docTitleEl = $("docTitle");
+  const playBtn = $("play"), stopBtn = $("stop");
+  const voiceSel = $("voice"), rateEl = $("rate"), rateVal = $("rateVal"), pitchEl = $("pitch");
+  const voiceHint = $("voiceHint");
+  const voiceFilter = $("voiceFilter"), voiceCount = $("voiceCount");
+
+  const synth = window.speechSynthesis;
+
+  // Pause lengths (ms) inserted after the last sentence of a block.
+  const PAUSE = { title: 850, subtitle: 550, text: 300, beforeHeading: 500 };
+
+  let units = [];          // [{ text, type, lastInBlock }]
+  let spanEls = [];        // matching <span> elements
+  let idx = 0;             // current unit index
+  let speaking = false, paused = false, inGap = false;
+  let pauseTimer = null, nextIndex = null;
+  let genId = 0;           // bumped on every cancel; stale utterance handlers bail
+
+  // ---------- Preferences (default voice / speed / pitch) ----------
+  const PREFS_KEY = "audiobookReaderPrefs";
+  let prefs = {};
+  try { prefs = JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch (_) { prefs = {}; }
+  if (prefs.rate)  rateEl.value  = prefs.rate;
+  if (prefs.pitch) pitchEl.value = prefs.pitch;
+  rateVal.textContent = parseFloat(rateEl.value).toFixed(1) + "×";
+
+  function savePrefs() {
+    const opt = voiceSel.selectedOptions[0];
+    prefs.voice = opt ? opt.dataset.name : prefs.voice;
+    prefs.rate = rateEl.value;
+    prefs.pitch = pitchEl.value;
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  }
+
+  // ---------- File handling ----------
+  dropEl.addEventListener("click", () => fileEl.click());
+  fileEl.addEventListener("change", (e) => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+  ["dragover", "dragenter"].forEach(ev =>
+    dropEl.addEventListener(ev, (e) => { e.preventDefault(); dropEl.classList.add("drag"); }));
+  ["dragleave", "drop"].forEach(ev =>
+    dropEl.addEventListener(ev, (e) => { e.preventDefault(); dropEl.classList.remove("drag"); }));
+  dropEl.addEventListener("drop", (e) => { if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
+
+  function setStatus(msg, isErr) {
+    statusEl.innerHTML = isErr ? `<span class="err">${msg}</span>` : msg;
+  }
+
+  async function loadFile(file) {
+    stopSpeaking();
+    const name = file.name;
+    const ext = name.split(".").pop().toLowerCase();
+    docTitleEl.textContent = "📄 " + name;
+    setStatus("Reading file…");
+    readerEl.classList.remove("show");
+    controls.classList.remove("show");
+
+    try {
+      let blocks = [];
+      if (ext === "pdf") blocks = await extractPdf(file);
+      else if (ext === "docx") blocks = await extractDocx(file);
+      else if (ext === "md" || ext === "markdown") blocks = extractMarkdown(await file.text());
+      else if (ext === "txt") blocks = extractPlainText(await file.text());
+      else if (ext === "doc")
+        throw new Error("Legacy .doc files aren't supported. Re-save as .docx or .pdf and try again.");
+      else throw new Error("Unsupported file type: ." + ext);
+
+      blocks = blocks.filter(b => b.text && b.text.trim());
+      if (!blocks.length) throw new Error("No readable text found (a scanned/image-only PDF has no text layer).");
+
+      buildReader(blocks);
+      const words = units.reduce((a, u) => a + u.text.split(/\s+/).length, 0);
+      const heads = blocks.filter(b => b.type !== "text").length;
+      setStatus(`Loaded ${units.length} sentences · ${heads} heading${heads === 1 ? "" : "s"} · ~${words.toLocaleString()} words · ~${Math.ceil(words / 150)} min at 1×.`);
+      controls.classList.add("show");
+      readerEl.classList.add("show");
+    } catch (err) {
+      setStatus(err.message || String(err), true);
+    }
+  }
+
+  // ---------- Extractors → array of { type:'title'|'subtitle'|'text', text } ----------
+
+  async function extractPdf(file) {
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    const lines = []; // { text, size }
+
+    for (let p = 1; p <= pdf.numPages; p++) {
+      setStatus(`Reading PDF… page ${p}/${pdf.numPages}`);
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      let items = [], size = 0;
+      const flush = () => {
+        const text = items.join(" ").replace(/\s+/g, " ").trim();
+        if (text) lines.push({ text, size });
+        items = []; size = 0;
+      };
+      for (const it of content.items) {
+        if (it.str) items.push(it.str);
+        const sz = Math.round((it.transform && it.transform[3]) || it.height || 0);
+        if (sz) size = Math.max(size, sz);
+        if (it.hasEOL) flush();
+      }
+      flush();
+    }
+
+    // Determine body font size = the size that covers the most characters.
+    const tally = {};
+    lines.forEach(l => { tally[l.size] = (tally[l.size] || 0) + l.text.length; });
+    let body = 0, most = -1;
+    for (const s in tally) if (tally[s] > most) { most = tally[s]; body = +s; }
+
+    const classify = (size) => {
+      if (!body) return "text";
+      if (size >= body * 1.45) return "title";
+      if (size >= body * 1.15) return "subtitle";
+      return "text";
+    };
+
+    // Merge consecutive body lines into paragraphs; each heading is its own block.
+    const blocks = [];
+    let para = [];
+    const flushPara = () => { if (para.length) { blocks.push({ type: "text", text: para.join(" ") }); para = []; } };
+    for (const l of lines) {
+      const t = classify(l.size);
+      if (t === "text") para.push(l.text);
+      else { flushPara(); blocks.push({ type: t, text: l.text }); }
+    }
+    flushPara();
+    return blocks;
+  }
+
+  async function extractDocx(file) {
+    const buf = await file.arrayBuffer();
+    // convertToHtml preserves heading structure (mammoth maps Word styles → h1/h2/...).
+    const res = await mammoth.convertToHtml({ arrayBuffer: buf });
+    const doc = new DOMParser().parseFromString(res.value, "text/html");
+    const blocks = [];
+    doc.body.querySelectorAll("h1, h2, h3, h4, h5, h6, p, li").forEach(el => {
+      const text = el.textContent.trim();
+      if (!text) return;
+      const tag = el.tagName.toLowerCase();
+      let type = "text";
+      if (tag === "h1") type = "title";
+      else if (tag[0] === "h") type = "subtitle"; // h2–h6
+      blocks.push({ type, text });
+    });
+    return blocks;
+  }
+
+  function cleanMd(s) {
+    return s
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, "")           // images
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")        // links → text
+      .replace(/[*_~`]+/g, "")                         // emphasis / code marks
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function extractMarkdown(raw) {
+    const lines = raw.replace(/\r/g, "").split("\n");
+    const blocks = [];
+    let para = [];
+    const flushPara = () => { if (para.length) { blocks.push({ type: "text", text: cleanMd(para.join(" ")) }); para = []; } };
+    for (const line of lines) {
+      const h = line.match(/^(#{1,6})\s+(.+?)\s*#*$/);
+      if (h) { flushPara(); blocks.push({ type: h[1].length === 1 ? "title" : "subtitle", text: cleanMd(h[2]) }); }
+      else if (!line.trim()) flushPara();
+      else para.push(line.trim());
+    }
+    flushPara();
+    return blocks;
+  }
+
+  function extractPlainText(raw) {
+    const chunks = raw.replace(/\r/g, "").split(/\n{2,}/);
+    const blocks = [];
+    let firstHeading = true;
+    for (let chunk of chunks) {
+      chunk = chunk.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+      if (!chunk) continue;
+      // Heuristic: a short standalone line with no terminal punctuation reads like a heading.
+      const looksHeading = chunk.length < 60 && !/[.?!,;:]$/.test(chunk) && chunk.split(" ").length <= 10;
+      if (looksHeading) {
+        blocks.push({ type: firstHeading ? "title" : "subtitle", text: chunk });
+        firstHeading = false;
+      } else {
+        blocks.push({ type: "text", text: chunk });
+      }
+    }
+    return blocks;
+  }
+
+  // ---------- Sentence splitting + render ----------
+  // Loss-less: split only on . ! ? that are followed by whitespace/end, so
+  // decimals (3.5), abbreviations, and symbols are never broken or dropped.
+  function splitSentences(text) {
+    text = text.replace(/\s+/g, " ").trim();
+    if (!text) return [];
+    const out = [];
+    const re = /[.!?]+(?=\s|$)/g;
+    let last = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      const end = m.index + m[0].length;
+      out.push(text.slice(last, end).trim());
+      last = end;
+    }
+    if (last < text.length) out.push(text.slice(last).trim());
+    return out.filter(Boolean);
+  }
+
+  // ---------- Math / symbol → speech ----------
+  // Applied ONLY to the spoken string; the on-screen text keeps real symbols.
+  const MATH_SYM = {
+    "≤": "less than or equal to", "≥": "greater than or equal to",
+    "≠": "not equal to", "≈": "approximately equal to", "≅": "approximately equal to",
+    "≡": "equivalent to", "≪": "much less than", "≫": "much greater than",
+    "±": "plus or minus", "∓": "minus or plus",
+    "×": "times", "÷": "divided by", "⋅": "times", "∗": "times", "−": "minus",
+    "√": "the square root of", "∛": "the cube root of",
+    "∞": "infinity", "∝": "proportional to",
+    "∑": "the sum of", "∏": "the product of", "∫": "the integral of",
+    "∂": "the partial derivative of", "∇": "del", "∆": "delta", "Δ": "delta",
+    "∈": "in", "∉": "not in", "⊂": "subset of", "⊆": "subset of or equal to",
+    "⊃": "superset of", "⊇": "superset of or equal to",
+    "∪": "union", "∩": "intersection", "∅": "the empty set",
+    "∀": "for all", "∃": "there exists", "∄": "there does not exist",
+    "∴": "therefore", "∵": "because", "⊥": "perpendicular to", "∥": "parallel to",
+    "→": "to", "⇒": "implies", "↔": "if and only if", "⇔": "if and only if", "←": "from",
+    "°": "degrees", "′": "prime", "″": "double prime",
+    "π": "pi", "τ": "tau", "θ": "theta", "λ": "lambda", "μ": "mu", "µ": "mu",
+    "σ": "sigma", "Σ": "sigma", "α": "alpha", "β": "beta", "γ": "gamma",
+    "δ": "delta", "ε": "epsilon", "ω": "omega", "Ω": "omega", "φ": "phi", "ϕ": "phi",
+    "ρ": "rho", "η": "eta", "ξ": "xi", "ζ": "zeta", "ψ": "psi", "χ": "chi",
+  };
+  const MATH_FRAC = {
+    "½": "one half", "⅓": "one third", "⅔": "two thirds", "¼": "one quarter",
+    "¾": "three quarters", "⅕": "one fifth", "⅖": "two fifths", "⅗": "three fifths",
+    "⅘": "four fifths", "⅙": "one sixth", "⅚": "five sixths", "⅛": "one eighth",
+    "⅜": "three eighths", "⅝": "five eighths", "⅞": "seven eighths",
+    "⅐": "one seventh", "⅑": "one ninth", "⅒": "one tenth",
+  };
+  const SUP = { "⁰": "0", "¹": "1", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9", "ⁿ": "n" };
+  const SUB = { "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4", "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9" };
+
+  function mathToSpeech(s) {
+    // Caret exponents: x^2 → "x squared", x^n → "x to the power of n"
+    s = s.replace(/\^\s*2\b/g, " squared").replace(/\^\s*3\b/g, " cubed");
+    s = s.replace(/([A-Za-z0-9)\]])\s*\^\s*\{?\s*(-?\d+(?:\.\d+)?|[A-Za-z])\s*\}?/g, "$1 to the power of $2");
+    // Multi-char ASCII operators (before single-char ones)
+    s = s.replace(/>=/g, " greater than or equal to ")
+         .replace(/<=/g, " less than or equal to ")
+         .replace(/!=/g, " not equal to ")
+         .replace(/==/g, " equals ")
+         .replace(/=>/g, " implies ")
+         .replace(/->/g, " to ");
+    // Number ranges with dashes: 10–20 → "10 to 20"
+    s = s.replace(/(\d)\s*[–—]\s*(\d)/g, "$1 to $2");
+    // Division by slash — but leave dates/paths (runs with 2+ slashes) alone
+    s = s.replace(/\d+(?:\.\d+)?(?:\s*\/\s*\d+(?:\.\d+)?)+/g,
+      (m) => /\/.*\//.test(m) ? m : m.replace(/\s*\/\s*/, " divided by "));
+    s = s.replace(/(\d)\s*\*\s*(\d)/g, "$1 times $2");
+    s = s.replace(/(\d)\s*\+\s*(\d)/g, "$1 plus $2").replace(/ \+ /g, " plus ");
+    // Single-char comparison operators
+    s = s.replace(/</g, " less than ").replace(/>/g, " greater than ").replace(/=/g, " equals ");
+    s = s.replace(/%/g, " percent ");
+    // Superscripts / subscripts
+    s = s.replace(/²/g, " squared").replace(/³/g, " cubed");
+    s = s.replace(/[⁰¹⁴⁵⁶⁷⁸⁹ⁿ]+/g, (m) => " to the power of " + [...m].map(c => SUP[c] || "").join(""));
+    s = s.replace(/[₀₁₂₃₄₅₆₇₈₉]+/g, (m) => " sub " + [...m].map(c => SUB[c] || "").join(""));
+    // Vulgar fractions
+    for (const [sym, word] of Object.entries(MATH_FRAC)) s = s.split(sym).join(` ${word} `);
+    // Remaining symbols / Greek letters
+    for (const [sym, word] of Object.entries(MATH_SYM)) s = s.split(sym).join(` ${word} `);
+    return s.replace(/\s+([,.;:!?])/g, "$1").replace(/\s+/g, " ").trim();
+  }
+
+  function buildReader(blocks) {
+    units = []; spanEls = []; readerEl.innerHTML = "";
+    blocks.forEach(b => {
+      const sents = splitSentences(b.text);
+      if (!sents.length) return;
+      let container;
+      if (b.type === "title") { container = document.createElement("div"); container.className = "b-title"; }
+      else if (b.type === "subtitle") { container = document.createElement("div"); container.className = "b-sub"; }
+      else { container = document.createElement("p"); container.className = "b-text"; }
+
+      sents.forEach((s, si) => {
+        const myIndex = units.length;
+        const span = document.createElement("span");
+        span.className = "sent";
+        span.textContent = s + " ";
+        span.addEventListener("click", () => restartFrom(myIndex));
+        container.appendChild(span);
+        units.push({ text: s, type: b.type, lastInBlock: si === sents.length - 1 });
+        spanEls.push(span);
+      });
+      readerEl.appendChild(container);
+    });
+    idx = 0;
+  }
+
+  // ---------- Voices ----------
+  let allVoices = [];
+  const isEnhanced = (name) => /\((Enhanced|Premium)\)/i.test(name);
+
+  // Build the <select> (grouped: Enhanced/Premium pinned on top), honoring the filter box.
+  function renderVoiceOptions() {
+    const filter = voiceFilter.value.trim().toLowerCase();
+    const keep = voiceSel.selectedOptions[0]?.dataset.name;
+    voiceSel.innerHTML = "";
+
+    const enh = [], eng = [], other = [];
+    allVoices.forEach((v, i) => {
+      if (filter && !`${v.name} ${v.lang}`.toLowerCase().includes(filter)) return;
+      const e = { v, i };
+      if (isEnhanced(v.name)) enh.push(e);
+      else if (v.lang.toLowerCase().startsWith("en")) eng.push(e);
+      else other.push(e);
+    });
+
+    const addGroup = (label, arr) => {
+      if (!arr.length) return;
+      const og = document.createElement("optgroup");
+      og.label = label;
+      arr.forEach(({ v, i }) => {
+        const opt = document.createElement("option");
+        opt.value = i;
+        opt.dataset.name = v.name;
+        opt.textContent = `${v.name} (${v.lang})`;
+        og.appendChild(opt);
+      });
+      voiceSel.appendChild(og);
+    };
+    addGroup("★ Enhanced & Premium", enh);
+    addGroup("English", eng);
+    addGroup("Other languages", other);
+
+    // Keep the current selection visible if it survived the filter.
+    if (keep) {
+      const m = [...voiceSel.options].find(o => o.dataset.name === keep);
+      if (m) voiceSel.value = m.value;
+    }
+  }
+
+  function restoreVoiceSelection() {
+    const opts = [...voiceSel.options];
+    if (!opts.length) return;
+    if (prefs.voice) {
+      const m = opts.find(o => o.dataset.name === prefs.voice);
+      if (m) { voiceSel.value = m.value; return; }
+    }
+    // First-run default: best English voice available → enhanced first.
+    const enEnh = opts.find(o => isEnhanced(o.dataset.name) && /\(en/i.test(o.textContent));
+    const anyEnh = opts.find(o => isEnhanced(o.dataset.name));
+    const anyEn = opts.find(o => /\(en/i.test(o.textContent));
+    const pick = enEnh || anyEnh || anyEn || opts[0];
+    if (pick) voiceSel.value = pick.value;
+  }
+
+  function updateVoiceCount() {
+    const n = allVoices.length;
+    const e = allVoices.filter(v => isEnhanced(v.name)).length;
+    voiceCount.textContent = n
+      ? `${n} voices available${e ? ` · ${e} enhanced/premium` : " · none enhanced"}`
+      : "loading voices…";
+  }
+
+  let voiceSig = "";
+  function populateVoices() {
+    const voices = synth.getVoices();
+    if (!voices.length) return;
+    // Skip needless rebuilds (onvoiceschanged can fire repeatedly), which would
+    // otherwise disrupt the open dropdown / active filter while the user is choosing.
+    const sig = voices.length + "|" + voices.map(v => v.name).join(",");
+    if (sig === voiceSig) return;
+    voiceSig = sig;
+    allVoices = voices;
+    renderVoiceOptions();
+    restoreVoiceSelection();
+    updateVoiceCount();
+  }
+
+  voiceFilter.addEventListener("input", renderVoiceOptions);
+  // Detect browsers that under-expose macOS system voices (Chromium-based:
+  // Chrome, Comet, Edge, Brave, Arc…). Safari surfaces all installed voices.
+  function isSafari() {
+    const ua = navigator.userAgent;
+    return /^((?!chrome|chromium|crios|edg|android).)*safari/i.test(ua);
+  }
+
+  function updateVoiceHint() {
+    const voices = synth.getVoices();
+    const hasPremium = voices.some(v => /enhanced|premium/i.test(v.name));
+    if (voices.length && !hasPremium) {
+      voiceHint.innerHTML =
+        '⚠︎ No <strong>Enhanced/Premium</strong> voices are visible in this browser. On macOS, ' +
+        '<strong>Safari exposes only a limited voice set without them</strong>; <strong>Chromium-based ' +
+        'browsers (Comet, Chrome, Edge, Brave) expose the full system list</strong> including voices ' +
+        'like Jamie (Enhanced). Open this page in one of those to use them. ' +
+        '(Download voices via System Settings → Accessibility → Spoken Content → Manage Voices.)';
+      voiceHint.style.display = "block";
+    } else {
+      voiceHint.style.display = "none";
+    }
+  }
+
+  // Voices often load asynchronously; poll briefly until they appear.
+  let voiceTries = 0;
+  function ensureVoices() {
+    populateVoices();
+    updateVoiceHint();
+    if (!synth.getVoices().length && voiceTries++ < 20) setTimeout(ensureVoices, 250);
+  }
+  ensureVoices();
+  synth.onvoiceschanged = () => { populateVoices(); updateVoiceHint(); };
+
+  $("refreshVoices").addEventListener("click", () => {
+    voiceTries = 0;
+    ensureVoices();
+  });
+
+  voiceSel.addEventListener("change", savePrefs);
+  rateEl.addEventListener("input", () => { rateVal.textContent = parseFloat(rateEl.value).toFixed(1) + "×"; });
+  rateEl.addEventListener("change", savePrefs);
+  pitchEl.addEventListener("change", savePrefs);
+
+  // ---------- Speech ----------
+  function speakFrom(i) {
+    if (i >= units.length) { stopSpeaking(); setStatus("✓ Finished."); return; }
+    idx = i;
+    const gen = genId;
+    const u = new SpeechSynthesisUtterance(mathToSpeech(units[i].text));
+    const voices = synth.getVoices();
+    const v = voices[parseInt(voiceSel.value, 10)];
+    if (v) u.voice = v;
+    u.rate = parseFloat(rateEl.value);
+    u.pitch = parseFloat(pitchEl.value);
+    u.onstart = () => { if (gen === genId) highlight(i); };
+    u.onend = () => onUtteranceEnd(i, gen);
+    u.onerror = () => onUtteranceEnd(i, gen);
+    synth.speak(u);
+  }
+
+  function onUtteranceEnd(i, gen) {
+    // Ignore events from utterances that were superseded by a cancel.
+    if (gen !== genId || !speaking) return;
+    if (units[i].lastInBlock) {
+      // Pause proportionally; a bit longer if the next block is a heading.
+      let ms = PAUSE[units[i].type] || PAUSE.text;
+      const next = units[i + 1];
+      if (next && next.type !== "text") ms = Math.max(ms, PAUSE.beforeHeading);
+      inGap = true; nextIndex = i + 1;
+      pauseTimer = setTimeout(() => {
+        pauseTimer = null;
+        if (paused) return;          // resume() will continue the gap
+        inGap = false;
+        const n = nextIndex; nextIndex = null;
+        if (speaking) speakFrom(n);
+      }, ms);
+    } else {
+      speakFrom(i + 1);
+    }
+  }
+
+  function highlight(i) {
+    spanEls.forEach(s => s.classList.remove("active"));
+    const el = spanEls[i];
+    if (el) {
+      el.classList.add("active");
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+
+  function startSpeaking() {
+    if (!units.length) return;
+    speaking = true; paused = false;
+    playBtn.textContent = "⏸ Pause";
+    stopBtn.disabled = false;
+    speakFrom(idx);
+  }
+
+  function pauseSpeaking() {
+    paused = true;
+    playBtn.textContent = "▶ Resume";
+    if (inGap) { clearTimeout(pauseTimer); pauseTimer = null; } // hold inside a gap
+    else synth.pause();
+  }
+
+  function resumeSpeaking() {
+    paused = false;
+    playBtn.textContent = "⏸ Pause";
+    if (inGap) { inGap = false; const n = nextIndex; nextIndex = null; speakFrom(n); }
+    else synth.resume();
+  }
+
+  function stopSpeaking() {
+    speaking = false; paused = false; inGap = false; nextIndex = null;
+    clearTimeout(pauseTimer); pauseTimer = null;
+    genId++;                 // invalidate any in-flight utterance handlers
+    synth.cancel();
+    playBtn.textContent = "▶ Play";
+    stopBtn.disabled = true;
+    spanEls.forEach(s => s.classList.remove("active"));
+  }
+
+  function restartFrom(i) {
+    clearTimeout(pauseTimer); pauseTimer = null;
+    inGap = false; nextIndex = null;
+    genId++;                 // kill the old chain before starting a new one
+    synth.cancel();
+    idx = i;
+    speaking = true; paused = false;
+    playBtn.textContent = "⏸ Pause";
+    stopBtn.disabled = false;
+    speakFrom(i);
+  }
+
+  playBtn.addEventListener("click", () => {
+    if (!speaking) startSpeaking();
+    else if (paused) resumeSpeaking();
+    else pauseSpeaking();
+  });
+  stopBtn.addEventListener("click", () => { stopSpeaking(); idx = 0; });
+
+  // Spacebar toggles play/pause (unless focused on a control)
+  document.addEventListener("keydown", (e) => {
+    if (e.code === "Space" && controls.classList.contains("show") &&
+        e.target.tagName !== "SELECT" && e.target.tagName !== "INPUT") {
+      e.preventDefault();
+      playBtn.click();
+    }
+  });
+
+  // Register the service worker so the app works fully offline after first load
+  // (installed to the home screen, it reads documents downloaded on the device).
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("service-worker.js").catch(() => {});
+    });
+  }
+
+  // Chrome silences long synth after ~15s; nudge it while actively speaking.
+  // Safari/iOS have no such bug and the pause/resume nudge makes them stutter — skip there.
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const NEEDS_KEEPALIVE = !isSafari() && !isIOS;
+  setInterval(() => {
+    if (NEEDS_KEEPALIVE && speaking && !paused && !inGap && synth.speaking) {
+      synth.pause(); synth.resume();
+    }
+  }, 10000);
+</script>
+</body>
+</html>
