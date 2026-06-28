@@ -247,6 +247,7 @@
   let speaking = false, paused = false, inGap = false;
   let pauseTimer = null, nextIndex = null;
   let genId = 0;           // bumped on every cancel; stale utterance handlers bail
+  let currentDocId = null; // identifies the loaded doc so progress maps to it
 
   // ---------- Preferences (default voice / speed / pitch) ----------
   const PREFS_KEY = "audiobookReaderPrefs";
@@ -264,6 +265,149 @@
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   }
 
+  // ---------- Persist & restore the last document (IndexedDB) ----------
+  // The raw file bytes live in IndexedDB (it handles large PDFs); the reading
+  // position lives in localStorage. On launch we reload both automatically.
+  const DB_NAME = "audiobookReader", STORE = "docs", DOC_KEY = "lastDoc";
+  const PROG_KEY = "audiobookReaderProgress";
+
+  function idbOpen() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  function idbReq(mode, fn) {
+    return idbOpen().then(db => new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, mode);
+      const r = fn(tx.objectStore(STORE));
+      tx.oncomplete = () => resolve(r && r.result);
+      tx.onerror = () => reject(tx.error);
+    }));
+  }
+  const idbPut = (key, val) => idbReq("readwrite", s => s.put(val, key));
+  const idbGet = (key) => idbReq("readonly", s => s.get(key));
+  const idbDel = (key) => idbReq("readwrite", s => s.delete(key));
+
+  const docId = (file) => `${file.name}:${file.size}`;
+
+  function saveProgress(i) {
+    if (!currentDocId) return;
+    try { localStorage.setItem(PROG_KEY, JSON.stringify({ docId: currentDocId, idx: i })); } catch (_) {}
+  }
+  function loadProgress() {
+    try { return JSON.parse(localStorage.getItem(PROG_KEY)); } catch (_) { return null; }
+  }
+  let lastProgSave = 0;
+  function maybeSaveProgress(i) {            // throttle writes during playback
+    const t = Date.now();
+    if (t - lastProgSave > 2000) { lastProgSave = t; saveProgress(i); }
+  }
+
+  async function saveLastDoc(file) {
+    try {
+      const buf = await file.arrayBuffer();
+      await idbPut(DOC_KEY, { name: file.name, type: file.type, size: file.size, buf, savedAt: Date.now() });
+    } catch (_) {}
+  }
+
+  async function restoreLastDoc() {
+    let rec;
+    try { rec = await idbGet(DOC_KEY); } catch (_) { return; }
+    if (!rec || !rec.buf) return;
+    const file = new File([rec.buf], rec.name, { type: rec.type || "" });
+    await loadFile(file, { restoring: true });
+    if (!units.length) return;
+    const prog = loadProgress();
+    let resumed = "";
+    if (prog && prog.docId === currentDocId && prog.idx > 0 && prog.idx < units.length) {
+      idx = prog.idx;
+      highlight(idx);
+      resumed = " · ▶ resumes where you left off";
+    }
+    setStatus("📂 Restored “" + rec.name + ".” " + statusEl.textContent + resumed);
+  }
+
+  async function forgetLastDoc() {
+    stopSpeaking();
+    try { await idbDel(DOC_KEY); } catch (_) {}
+    try { localStorage.removeItem(PROG_KEY); } catch (_) {}
+    units = []; spanEls = []; idx = 0; currentDocId = null;
+    readerEl.innerHTML = "";
+    readerEl.classList.remove("show");
+    controls.classList.remove("show");
+    docTitleEl.textContent = "";
+    forgetBtn.style.display = "none";
+    setStatus("Saved document cleared — choose a new file to begin.");
+  }
+
+  // "Forget" control, revealed once a document is loaded.
+  const forgetBtn = document.createElement("button");
+  forgetBtn.textContent = "✕ Forget saved file";
+  forgetBtn.className = "ctl secondary";
+  forgetBtn.style.cssText = "display:none; font-size:12px; padding:6px 10px; margin:8px 2px 0;";
+  forgetBtn.addEventListener("click", forgetLastDoc);
+  docTitleEl.insertAdjacentElement("afterend", forgetBtn);
+
+  // ---------- Background / lock-screen playback ----------
+  // Continuous playback with the screen fully off is an OS-level limit for
+  // browser speech on iOS. These make it as resilient as the platform allows:
+  // a Wake Lock keeps the screen on while reading, a silent looping audio track
+  // holds an audio session, and MediaSession adds lock-screen / headphone /
+  // Now-Playing controls.
+  function silentWavURL() {                  // build a valid 1s silent WAV
+    const rate = 8000, n = rate, buf = new ArrayBuffer(44 + n), v = new DataView(buf);
+    const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    str(0, "RIFF"); v.setUint32(4, 36 + n, true); str(8, "WAVE"); str(12, "fmt ");
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate, true); v.setUint16(32, 1, true);
+    v.setUint16(34, 8, true); str(36, "data"); v.setUint32(40, n, true);
+    for (let i = 0; i < n; i++) v.setUint8(44 + i, 128); // 128 = silence (8-bit PCM)
+    return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+  }
+  let silentAudio = null, wakeLock = null;
+  function startAudioSession() {
+    try {
+      if (!silentAudio) {
+        silentAudio = new Audio(silentWavURL());
+        silentAudio.loop = true; silentAudio.preload = "auto";
+        silentAudio.setAttribute("playsinline", "");
+      }
+      const p = silentAudio.play();
+      if (p && p.catch) p.catch(() => {});
+    } catch (_) {}
+  }
+  function stopAudioSession() { try { silentAudio && silentAudio.pause(); } catch (_) {} }
+  async function acquireWakeLock() {
+    try { if ("wakeLock" in navigator && !wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (_) {}
+  }
+  function releaseWakeLock() { try { wakeLock && wakeLock.release(); } catch (_) {} wakeLock = null; }
+
+  function headingAfter(i)  { for (let k = i + 1; k < units.length; k++) if (units[k].type !== "text") return k; return null; }
+  function headingBefore(i) { for (let k = i - 1; k >= 0; k--) if (units[k].type !== "text") return k; return null; }
+
+  function setMediaState(state) {
+    if ("mediaSession" in navigator) { try { navigator.mediaSession.playbackState = state; } catch (_) {} }
+  }
+  function setupMediaSession(title) {
+    if (!("mediaSession" in navigator)) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: title || "Document", artist: "Audiobook Reader", album: "On-device narration",
+      });
+      const H = (name, fn) => { try { navigator.mediaSession.setActionHandler(name, fn); } catch (_) {} };
+      H("play",  () => { if (!speaking) startSpeaking(); else if (paused) resumeSpeaking(); });
+      H("pause", () => { if (speaking && !paused) pauseSpeaking(); });
+      H("stop",  () => stopSpeaking());
+      H("previoustrack", () => { const h = headingBefore(idx); restartFrom(h == null ? Math.max(0, idx - 1) : h); });
+      H("nexttrack",     () => { const h = headingAfter(idx);  if (h != null) restartFrom(h); });
+      H("seekbackward",  () => restartFrom(Math.max(0, idx - 1)));
+      H("seekforward",   () => restartFrom(Math.min(units.length - 1, idx + 1)));
+    } catch (_) {}
+  }
+
   // ---------- File handling ----------
   dropEl.addEventListener("click", () => fileEl.click());
   fileEl.addEventListener("change", (e) => { if (e.target.files[0]) loadFile(e.target.files[0]); });
@@ -277,7 +421,7 @@
     statusEl.innerHTML = isErr ? `<span class="err">${msg}</span>` : msg;
   }
 
-  async function loadFile(file) {
+  async function loadFile(file, opts = {}) {
     stopSpeaking();
     const name = file.name;
     const ext = name.split(".").pop().toLowerCase();
@@ -305,6 +449,10 @@
       setStatus(`Loaded ${units.length} sentences · ${heads} heading${heads === 1 ? "" : "s"} · ~${words.toLocaleString()} words · ~${Math.ceil(words / 150)} min at 1×.`);
       controls.classList.add("show");
       readerEl.classList.add("show");
+      currentDocId = docId(file);
+      forgetBtn.style.display = "inline-block";
+      setupMediaSession(file.name);
+      if (!opts.restoring) { saveLastDoc(file); saveProgress(0); }  // remember this file for next launch
     } catch (err) {
       setStatus(err.message || String(err), true);
     }
@@ -713,7 +861,7 @@
     if (v) u.voice = v;
     u.rate = parseFloat(rateEl.value);
     u.pitch = parseFloat(pitchEl.value);
-    u.onstart = () => { if (gen === genId) highlight(i); };
+    u.onstart = () => { if (gen === genId) { highlight(i); maybeSaveProgress(i); } };
     u.onend = () => onUtteranceEnd(i, gen);
     u.onerror = () => onUtteranceEnd(i, gen);
     synth.speak(u);
@@ -754,6 +902,7 @@
     speaking = true; paused = false;
     playBtn.textContent = "⏸ Pause";
     stopBtn.disabled = false;
+    startAudioSession(); acquireWakeLock(); setMediaState("playing");
     speakFrom(idx);
   }
 
@@ -762,11 +911,13 @@
     playBtn.textContent = "▶ Resume";
     if (inGap) { clearTimeout(pauseTimer); pauseTimer = null; } // hold inside a gap
     else synth.pause();
+    setMediaState("paused"); releaseWakeLock(); saveProgress(idx);
   }
 
   function resumeSpeaking() {
     paused = false;
     playBtn.textContent = "⏸ Pause";
+    startAudioSession(); acquireWakeLock(); setMediaState("playing");
     if (inGap) { inGap = false; const n = nextIndex; nextIndex = null; speakFrom(n); }
     else synth.resume();
   }
@@ -779,6 +930,7 @@
     playBtn.textContent = "▶ Play";
     stopBtn.disabled = true;
     spanEls.forEach(s => s.classList.remove("active"));
+    stopAudioSession(); releaseWakeLock(); setMediaState("none");
   }
 
   function restartFrom(i) {
@@ -790,6 +942,8 @@
     speaking = true; paused = false;
     playBtn.textContent = "⏸ Pause";
     stopBtn.disabled = false;
+    startAudioSession(); acquireWakeLock(); setMediaState("playing");
+    saveProgress(i);
     speakFrom(i);
   }
 
@@ -816,6 +970,21 @@
       navigator.serviceWorker.register("service-worker.js").catch(() => {});
     });
   }
+
+  // Keep playback resilient across backgrounding; save position on the way out.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") { saveProgress(idx); return; }
+    if (speaking && !paused) {                 // back in the foreground
+      acquireWakeLock();                       // wake lock drops when hidden — re-take it
+      // iOS suspends speech while backgrounded; if it died, continue from here.
+      if (!inGap && !synth.speaking) speakFrom(idx);
+    }
+  });
+  window.addEventListener("pagehide", () => saveProgress(idx));
+
+  // Reload the last document the user was reading (if any) and jump to where
+  // they left off. Runs after everything above is defined.
+  restoreLastDoc();
 
   // Chrome silences long synth after ~15s; nudge it while actively speaking.
   // Safari/iOS have no such bug and the pause/resume nudge makes them stutter — skip there.
