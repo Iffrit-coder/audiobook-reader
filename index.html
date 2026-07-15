@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>Audiobook Reader</title>
 
+<!-- Privacy, enforced by the browser rather than promised by us.
+     connect-src 'none' blocks every outbound request (fetch/XHR/WebSocket/beacon),
+     so this page physically cannot transmit a reader's document anywhere; everything
+     else is pinned to same-origin files shipped in this repo. If a future edit ever
+     added a CDN, an analytics tag, or an API call, it would fail loudly instead of
+     quietly leaking. Keep it that way. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'" />
+
 <!-- iOS / installable web-app -->
 <meta name="theme-color" content="#0f1115" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -143,6 +151,33 @@
   .sent:hover { background: var(--panel-2); }
   .sent.active { background: var(--highlight); color: #fff; }
   .err { color: #ff8080; }
+
+  /* Privacy / install panel — the first thing a new user should be able to check */
+  #about {
+    margin: 14px 0 0;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 16px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  #about summary {
+    cursor: pointer; color: var(--text);
+    font-weight: 600; font-size: 13px;
+  }
+  #about .about-body { padding-top: 6px; }
+  #about p { margin: 8px 0; }
+  #about ul { margin: 6px 0; padding-left: 20px; }
+  #about li { margin: 3px 0; }
+  #about strong { color: var(--text); }
+  #about a { color: var(--accent); }
+  #about code {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 5px; font-size: 12px;
+  }
+  #about .fine { font-size: 12px; opacity: .8; }
+
   footer { text-align: center; color: var(--muted); font-size: 12px; padding: 24px; }
   kbd { background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 11px; }
 
@@ -188,6 +223,33 @@
   </div>
   <input type="file" id="file" hidden
     accept=".pdf,.docx,.txt,.md,.markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" />
+
+  <details id="about">
+    <summary>🔒 Is this private? · How to install it</summary>
+    <div class="about-body">
+      <p><strong>Your documents never leave your device.</strong> Files are opened, read and
+        spoken entirely inside your browser. There is no server, no account, no sign-up,
+        no analytics, and no upload.</p>
+      <p><strong>You don't have to take our word for it.</strong> This page tells your browser
+        to block <em>every</em> outgoing network connection (<code>connect-src 'none'</code>).
+        Even if this app wanted to send your file somewhere, your browser would refuse to
+        let it. The PDF and Word readers are bundled in too — nothing is loaded from
+        anyone else's server.</p>
+      <p><strong>It works offline.</strong> After your first visit the whole app is saved on
+        your device. Switch on Airplane Mode and it still reads your books — which is the
+        simplest proof that nothing is being sent anywhere.</p>
+      <p><strong>Install it like an app:</strong></p>
+      <ul>
+        <li><strong>iPhone / iPad</strong> — open in Safari, tap Share, then <em>Add to Home Screen</em>.</li>
+        <li><strong>Android</strong> — Chrome menu, then <em>Install app</em>.</li>
+        <li><strong>Mac / Windows</strong> — Chrome or Edge, install icon in the address bar.</li>
+      </ul>
+      <p class="fine">The one thing that touches the network is downloading the app itself the
+        first time you open it — whoever hosts it sees that request, exactly like any other
+        website. Your documents are never part of it. Prefer to trust nobody?
+        <a href="https://github.com/Iffrit-coder/audiobook-reader">Read the source or host your own copy</a>.</p>
+    </div>
+  </details>
 
   <div class="controls" id="controls">
     <button class="ctl" id="play">▶ Play</button>
