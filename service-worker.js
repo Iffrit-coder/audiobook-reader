@@ -7,11 +7,14 @@ const ASSETS = [
   "./manifest.webmanifest",
   "./icon.svg",
   "./pdf-text.js",
+  "./pdf-ocr.js",
   "./vendor/pdf.min.js",
   "./vendor/pdf.worker.min.js",
   "./vendor/mammoth.browser.min.js",
   "./vendor/cmaps.js",
 ];
+// vendor/tesseract/ (text recognition for scanned PDFs, ~14 MB) is not
+// pre-cached; it's fetched the first time it's needed and cached from then on.
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

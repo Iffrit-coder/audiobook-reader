@@ -26,6 +26,7 @@
 <!-- Document parsers (vendored locally so the app works fully offline) -->
 <script src="vendor/pdf.min.js"></script>
 <script src="pdf-text.js"></script>
+<script src="pdf-ocr.js"></script>
 <script src="vendor/mammoth.browser.min.js"></script>
 
 <style>
@@ -395,6 +396,7 @@
 
   async function forgetLastDoc() {
     stopSpeaking();
+    try { if (currentDocId) await idbDel("ocr:" + currentDocId); } catch (_) {}
     try { await idbDel(DOC_KEY); } catch (_) {}
     try { localStorage.removeItem(PROG_KEY); } catch (_) {}
     units = []; spanEls = []; idx = 0; currentDocId = null;
@@ -495,7 +497,7 @@
 
     try {
       let blocks = [];
-      if (ext === "pdf") blocks = await extractPdf(file);
+      if (ext === "pdf") blocks = await extractPdf(file, opts);
       else if (ext === "docx") blocks = await extractDocx(file);
       else if (ext === "md" || ext === "markdown") blocks = extractMarkdown(await file.text());
       else if (ext === "txt") blocks = extractPlainText(await file.text());
@@ -505,7 +507,9 @@
 
       const notes = blocks.notes || [];
       blocks = blocks.filter(b => b.text && b.text.trim());
-      if (!blocks.length) throw new Error("No readable text found (a scanned/image-only PDF has no text layer).");
+      if (!blocks.length) throw new Error(ext === "pdf"
+        ? "No readable text found. If this is a scanned PDF, open it again and choose a language to recognize its text."
+        : "No readable text found.");
 
       buildReader(blocks);
       const words = units.reduce((a, u) => a + u.text.split(/\s+/).length, 0);
@@ -565,18 +569,81 @@
     }
   }
 
-  async function extractPdf(file) {
+  async function extractPdf(file, opts = {}) {
     const buf = await file.arrayBuffer();
     const pdf = await openPdf(buf);
     const res = await PdfText.extractDocument(pdf, {
       ops: pdfjsLib.OPS,
       onProgress: (p, n) => setStatus(`Reading PDF… page ${p}/${n}`),
     });
-    const blocks = PdfText.linesToBlocks(res.lines, pdf.numPages);
-    blocks.notes = [];
-    if (res.failedPages.length) blocks.notes.push(`skipped ${res.failedPages.length} unreadable page${res.failedPages.length === 1 ? "" : "s"}`);
+    const notes = [];
+    let lines = res.lines;
+    if (res.imagePages.length) {
+      const ocr = await ocrPages(pdf, res.imagePages, docId(file), opts);
+      if (ocr) {
+        const ocrLines = [];
+        for (const p of res.imagePages) ocrLines.push(...PdfText.ocrTextToLines(ocr[p], p));
+        // Put recognized pages back in page order among the pages that had text.
+        lines = lines.concat(ocrLines).map((l, i) => [l, i]).sort((a, b) => a[0].page - b[0].page || a[1] - b[1]).map((x) => x[0]);
+        notes.push(`text recognized on ${res.imagePages.length} scanned page${res.imagePages.length === 1 ? "" : "s"}`);
+      } else if (res.lines.length) {
+        notes.push(`${res.imagePages.length} scanned page${res.imagePages.length === 1 ? "" : "s"} not read`);
+      }
+    }
+    const blocks = PdfText.linesToBlocks(lines, pdf.numPages);
+    if (res.failedPages.length) notes.push(`skipped ${res.failedPages.length} unreadable page${res.failedPages.length === 1 ? "" : "s"}`);
+    blocks.notes = notes;
     pdf.destroy();
     return blocks;
+  }
+
+  // ---------- Scanned pages → on-device text recognition ----------
+  // Ask which language the scan is in (remembered), run Tesseract locally, and
+  // keep the result in IndexedDB so reopening the book is instant.
+  function askOcrLanguage(count) {
+    return new Promise((resolve) => {
+      const opts = [["eng", "English"], ["spa", "Español"], ["heb", "עברית"], ["eng+spa", "English + Español"]];
+      statusEl.innerHTML = "";
+      const msg = document.createElement("div");
+      msg.textContent = `${count === 1 ? "A page" : count + " pages"} of this PDF ${count === 1 ? "is a" : "are"} scanned picture${count === 1 ? "" : "s"} with no text. ` +
+        "Recognize the text on this device? Pick the language it's written in (takes a few seconds per page):";
+      statusEl.appendChild(msg);
+      const row = document.createElement("div");
+      row.style.cssText = "margin-top:8px; display:flex; flex-wrap:wrap; gap:6px;";
+      const add = (label, val, secondary) => {
+        const b = document.createElement("button");
+        b.className = "ctl" + (secondary ? " secondary" : "");
+        b.style.cssText = "font-size:13px; padding:6px 12px;";
+        b.textContent = label;
+        b.addEventListener("click", () => resolve(val));
+        row.appendChild(b);
+      };
+      opts.forEach(([val, label]) => add(label, val, val !== prefs.ocrLang && !(!prefs.ocrLang && val === "eng")));
+      add("Not now", null, true);
+      statusEl.appendChild(row);
+    });
+  }
+
+  async function ocrPages(pdf, pages, id, opts = {}) {
+    const key = "ocr:" + id;
+    try {
+      const cached = await idbGet(key);
+      if (cached && cached.pages && pages.every((p) => p in cached.pages)) return cached.pages;
+    } catch (_) {}
+    if (!window.PdfOcr) return null;
+    const lang = opts.restoring && prefs.ocrLang ? prefs.ocrLang : await askOcrLanguage(pages.length);
+    if (!lang) return null;
+    prefs.ocrLang = lang;
+    try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (_) {}
+    setStatus("Starting text recognition…");
+    try {
+      const result = await PdfOcr.recognize(pdf, pages, lang, (i, n, frac) =>
+        setStatus(`Recognizing text… page ${i}/${n}${frac ? ` · ${Math.round(frac * 100)}%` : ""}`));
+      try { await idbPut(key, { pages: result, lang, savedAt: Date.now() }); } catch (_) {}
+      return result;
+    } catch (err) {
+      throw new Error("Text recognition couldn't run in this browser" + (err && err.message ? ` (${err.message})` : "") + ".");
+    }
   }
 
   async function extractDocx(file) {
