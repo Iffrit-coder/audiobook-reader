@@ -502,7 +502,8 @@
         throw new Error("Legacy .doc files aren't supported. Re-save as .docx or .pdf and try again.");
       else throw new Error("Unsupported file type: ." + ext);
 
-      blocks = blocks.filter(b => b.text && b.text.trim());
+      blocks = blocks.filter(b => b.text && b.text.trim())
+                      .map(b => ({ ...b, text: normalizeLigatures(b.text) }));
       if (!blocks.length) throw new Error("No readable text found (a scanned/image-only PDF has no text layer).");
 
       buildReader(blocks);
@@ -520,6 +521,18 @@
     }
   }
 
+  // Some PDFs (LaTeX output especially) encode "fi", "fl", "ffi" etc. as a single
+  // ligature glyph instead of separate letters. Visually near-identical, but
+  // speech engines don't know how to pronounce the glyph — it mangles or drops
+  // it entirely, which is why long words like "scientific" and "efficient"
+  // (both contain "fi") come out wrong even on good voices.
+  function normalizeLigatures(s) {
+    return s
+      .replace(/ﬀ/g, "ff").replace(/ﬁ/g, "fi").replace(/ﬂ/g, "fl")
+      .replace(/ﬃ/g, "ffi").replace(/ﬄ/g, "ffl")
+      .replace(/ﬅ/g, "st").replace(/ﬆ/g, "st");
+  }
+
   // ---------- Extractors → array of { type:'title'|'subtitle'|'text', text } ----------
 
   async function extractPdf(file) {
@@ -532,14 +545,35 @@
       setStatus(`Reading PDF… page ${p}/${numPages}`);
       const page = await pdf.getPage(p);
       const content = await page.getTextContent();
-      let items = [], size = 0;
+      let text = "", size = 0, lastEndX = null;
       const flush = () => {
-        const text = items.join(" ").replace(/\s+/g, " ").trim();
-        if (text) lines.push({ text, size, page: p });
-        items = []; size = 0;
+        const t = text.replace(/\s+/g, " ").trim();
+        if (t) lines.push({ text: t, size, page: p });
+        text = ""; size = 0; lastEndX = null;
       };
       for (const it of content.items) {
-        if (it.str) items.push(it.str);
+        if (it.str) {
+          const x = it.transform ? it.transform[4] : null;
+          const itemSize = Math.round((it.transform && it.transform[3]) || it.height || 0);
+          // pdf.js hands us the text in separate positioned runs, and a run
+          // boundary does NOT mean a word boundary: fonts (LaTeX output
+          // especially) routinely split a word into runs around kerned pairs
+          // like "fi"/"fl"/"ff"/"ti" with zero actual gap between them. Only
+          // insert a space when the horizontal gap is big enough to be a real
+          // one — otherwise runs get concatenated directly, so "scienti" +
+          // "ﬁ" + "c" becomes "scientific", not "scienti fi c".
+          if (text && !/\s$/.test(text)) {
+            if (x !== null && lastEndX !== null) {
+              const gap = x - lastEndX;
+              const threshold = (itemSize || size || 10) * 0.22;
+              if (gap > threshold) text += " ";
+            } else {
+              text += " "; // no position info to judge — safest default
+            }
+          }
+          text += it.str;
+          if (x !== null) lastEndX = x + (it.width || 0);
+        }
         const sz = Math.round((it.transform && it.transform[3]) || it.height || 0);
         if (sz) size = Math.max(size, sz);
         if (it.hasEOL) flush();
@@ -741,7 +775,22 @@
     for (const [sym, word] of Object.entries(MATH_FRAC)) s = s.split(sym).join(` ${word} `);
     // Remaining symbols / Greek letters
     for (const [sym, word] of Object.entries(MATH_SYM)) s = s.split(sym).join(` ${word} `);
+    s = foldAccents(s);
     return s.replace(/\s+([,.;:!?])/g, "$1").replace(/\s+/g, " ").trim();
+  }
+
+  // Speak accented / non-English Latin letters as their plain base letter
+  // (ö → o, é → e, ñ → n, ç → c …). Spoken output only — the page still shows
+  // the original text. Letters that don't decompose get an explicit mapping.
+  const LETTER_FOLD = {
+    "ß": "ss", "ẞ": "SS", "æ": "ae", "Æ": "Ae", "œ": "oe", "Œ": "Oe",
+    "ø": "o", "Ø": "O", "ł": "l", "Ł": "L", "đ": "d", "Đ": "D", "ð": "d", "Ð": "D",
+    "þ": "th", "Þ": "Th", "ı": "i", "ħ": "h", "Ħ": "H", "ŧ": "t", "Ŧ": "T"
+  };
+  function foldAccents(s) {
+    s = s.replace(/[ßẞæÆœŒøØłŁđĐðÐþÞıħĦŧŦ]/g, (c) => LETTER_FOLD[c]);
+    // Decompose, drop combining marks that sit on a Latin letter, recompose.
+    return s.normalize("NFD").replace(/([A-Za-z])\p{M}+/gu, "$1").normalize("NFC");
   }
 
   function buildReader(blocks) {
