@@ -1,0 +1,13 @@
+{
+  "name": "audiobook-reader",
+  "private": true,
+  "description": "Static web app; this file only exists for the tests and the vendor build script. The app itself needs no build step.",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "build:cmaps": "node tools/build-cmaps.js",
+    "fixtures": "python3 tests/fixtures/make_fixtures.py"
+  },
+  "devDependencies": {
+    "pdfjs-dist": "3.11.174"
+  }
+}

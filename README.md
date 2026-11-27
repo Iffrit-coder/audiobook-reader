@@ -33,6 +33,9 @@ Don't want to trust the hosted copy? [Host your own](#self-hosting) — it's jus
 
 - **Reads PDF, DOCX, TXT, and Markdown** (legacy `.doc` isn't supported — re-save as `.docx`).
 - **Understands document structure.** Titles and subtitles are detected and read with proportional pauses instead of being run together with the body text.
+- **Reads tricky PDFs cleanly.** Words are rebuilt from where the letters sit on the page, so text set in mixed fonts, letter by letter, or without space characters comes out as whole words; two-column pages are read one column at a time, and words hyphenated across a line break are rejoined.
+- **Scanned PDFs too.** Pages that are just pictures can be recognized on your device (English, Spanish or Hebrew) with a bundled copy of Tesseract. The result is saved, so it only happens once per book.
+- **Password-protected and CJK PDFs** open: you're asked for the password, and Chinese/Japanese/Korean fonts are supported.
 - **Strips PDF clutter.** Repeated running headers, footers, download stamps, and page numbers are detected and skipped, so you don't hear "Downloaded on 3 March 2026" once per page.
 - **Speaks mathematical notation.** `<` becomes "less than", `x^2` becomes "x squared", plus Greek letters, fractions, sub/superscripts, and more.
 - **Click any sentence** to start reading from there. <kbd>Space</kbd> plays/pauses.
@@ -51,7 +54,7 @@ The app uses the voices your operating system already has, so voice quality is s
 
 - **Speech stops when an iPhone locks or the app is backgrounded.** This is an Apple restriction on browser text-to-speech, and no web app can work around it. The app keeps the screen awake while reading to make hands-free listening work; true locked-screen playback would require a native app.
 - **iOS may not expose Enhanced voices to web apps at all**, regardless of browser — every iOS browser shares the same speech engine.
-- **Scanned/image-only PDFs have no text layer** to read. There's no OCR.
+- **Text recognition for scanned PDFs takes a few seconds per page**, and its engine (~14 MB) downloads the first time you use it; after that it works offline too.
 - The ring/silent switch can mute playback on iPhone.
 
 ## Self-hosting
@@ -71,14 +74,17 @@ A secure context (`https://` or `localhost`) is required — service workers and
 
 ## How it's built
 
-Plain HTML, CSS, and JavaScript in a single `index.html`. No framework, no build tooling, no dependencies to install.
+Plain HTML, CSS, and JavaScript. No framework and no build step: the files in the repo are the app.
 
 | File | Purpose |
 |---|---|
-| `index.html` | The whole app — UI, parsers, speech engine |
+| `index.html` | The app — UI, document loading, speech engine |
+| `pdf-text.js` | Turns PDF text into clean lines, paragraphs and sentences (also used by the tests) |
+| `pdf-ocr.js` | On-device text recognition for scanned pages, loaded only when needed |
 | `service-worker.js` | Offline cache (bump `CACHE_VERSION` when assets change) |
 | `manifest.webmanifest` | Makes it installable |
-| `vendor/` | Bundled pdf.js + mammoth.js |
+| `vendor/` | Bundled pdf.js (+ `cmaps.js` for CJK fonts), mammoth.js, and Tesseract (`vendor/tesseract/`) |
+| `tests/` | `npm install && npm test` runs the PDF tests against the fixtures in `tests/fixtures/` (only needed for development) |
 
 ## License
 
