@@ -1,14 +1,16 @@
 // Offline cache for Audiobook Reader.
 // Bump CACHE_VERSION whenever index.html or the vendored libs change.
-const CACHE_VERSION = "audiobook-v5";
+const CACHE_VERSION = "audiobook-v6";
 const ASSETS = [
   "./",
   "./index.html",
   "./manifest.webmanifest",
   "./icon.svg",
+  "./pdf-text.js",
   "./vendor/pdf.min.js",
   "./vendor/pdf.worker.min.js",
   "./vendor/mammoth.browser.min.js",
+  "./vendor/cmaps.js",
 ];
 
 self.addEventListener("install", (event) => {
