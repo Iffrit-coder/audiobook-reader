@@ -506,7 +506,8 @@
       else throw new Error("Unsupported file type: ." + ext);
 
       const notes = blocks.notes || [];
-      blocks = blocks.filter(b => b.text && b.text.trim());
+      blocks = blocks.filter(b => b.text && b.text.trim())
+                      .map(b => ({ ...b, text: normalizeLigatures(b.text) }));
       if (!blocks.length) throw new Error(ext === "pdf"
         ? "No readable text found. If this is a scanned PDF, open it again and choose a language to recognize its text."
         : "No readable text found.");
@@ -524,6 +525,18 @@
     } catch (err) {
       setStatus(err.message || String(err), true);
     }
+  }
+
+  // Some PDFs (LaTeX output especially) encode "fi", "fl", "ffi" etc. as a single
+  // ligature glyph instead of separate letters. Visually near-identical, but
+  // speech engines don't know how to pronounce the glyph — it mangles or drops
+  // it entirely, which is why long words like "scientific" and "efficient"
+  // (both contain "fi") come out wrong even on good voices.
+  function normalizeLigatures(s) {
+    return s
+      .replace(/ﬀ/g, "ff").replace(/ﬁ/g, "fi").replace(/ﬂ/g, "fl")
+      .replace(/ﬃ/g, "ffi").replace(/ﬄ/g, "ffl")
+      .replace(/ﬅ/g, "st").replace(/ﬆ/g, "st");
   }
 
   // ---------- Extractors → array of { type:'title'|'subtitle'|'text', text } ----------
@@ -775,7 +788,22 @@
     for (const [sym, word] of Object.entries(MATH_FRAC)) s = s.split(sym).join(` ${word} `);
     // Remaining symbols / Greek letters
     for (const [sym, word] of Object.entries(MATH_SYM)) s = s.split(sym).join(` ${word} `);
+    s = foldAccents(s);
     return s.replace(/\s+([,.;:!?])/g, "$1").replace(/\s+/g, " ").trim();
+  }
+
+  // Speak accented / non-English Latin letters as their plain base letter
+  // (ö → o, é → e, ñ → n, ç → c …). Spoken output only — the page still shows
+  // the original text. Letters that don't decompose get an explicit mapping.
+  const LETTER_FOLD = {
+    "ß": "ss", "ẞ": "SS", "æ": "ae", "Æ": "Ae", "œ": "oe", "Œ": "Oe",
+    "ø": "o", "Ø": "O", "ł": "l", "Ł": "L", "đ": "d", "Đ": "D", "ð": "d", "Ð": "D",
+    "þ": "th", "Þ": "Th", "ı": "i", "ħ": "h", "Ħ": "H", "ŧ": "t", "Ŧ": "T"
+  };
+  function foldAccents(s) {
+    s = s.replace(/[ßẞæÆœŒøØłŁđĐðÐþÞıħĦŧŦ]/g, (c) => LETTER_FOLD[c]);
+    // Decompose, drop combining marks that sit on a Latin letter, recompose.
+    return s.normalize("NFD").replace(/([A-Za-z])\p{M}+/gu, "$1").normalize("NFC");
   }
 
   function buildReader(blocks) {
